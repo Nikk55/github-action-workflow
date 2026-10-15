@@ -1,3 +1,4 @@
+
 name: Deploy To Ubuntu
 
 on:
@@ -10,7 +11,6 @@ on:
 jobs:
   deploy:
     if: github.event.pull_request.merged == true
-
     runs-on: self-hosted
 
     steps:
@@ -36,33 +36,74 @@ jobs:
           chmod +x mvnw
           ./mvnw clean package -DskipTests
 
+      - name: Locate Application JAR
+        id: jar
+        run: |
+          JAR_FILE=$(find target -maxdepth 1 -type f \
+            -name '*.jar' ! -name '*.original' | head -n 1)
+
+          if [ -z "$JAR_FILE" ]; then
+            echo "ERROR: No application JAR found"
+            ls -la target/
+            exit 1
+          fi
+
+          echo "JAR_FILE=$JAR_FILE" >> "$GITHUB_ENV"
+          echo "Found JAR: $JAR_FILE"
+
+      - name: Prepare Deployment Directory
+        run: |
+          DEPLOY_DIR="$HOME/spring-demo"
+          mkdir -p "$DEPLOY_DIR"
+          echo "DEPLOY_DIR=$DEPLOY_DIR" >> "$GITHUB_ENV"
+
       - name: Stop Old Application
         run: |
-          if [ -f /home/ubuntu/spring-demo/app.pid ]; then
-            PID=$(cat /home/ubuntu/spring-demo/app.pid)
+          if [ -f "$DEPLOY_DIR/app.pid" ]; then
+            PID=$(cat "$DEPLOY_DIR/app.pid")
 
             if kill -0 "$PID" 2>/dev/null; then
               kill "$PID"
-              sleep 2
+              for i in {1..10}; do
+                kill -0 "$PID" 2>/dev/null || break
+                sleep 1
+              done
+
+              if kill -0 "$PID" 2>/dev/null; then
+                echo "Old application did not stop"
+                exit 1
+              fi
             fi
 
-            rm -f /home/ubuntu/spring-demo/app.pid
+            rm -f "$DEPLOY_DIR/app.pid"
           fi
 
       - name: Copy New Application
         run: |
-          mkdir -p /home/ubuntu/spring-demo
-          cp target/app.jar /home/ubuntu/spring-demo/app.jar
+          cp "$JAR_FILE" "$DEPLOY_DIR/app.jar"
+          echo "Application copied successfully"
 
       - name: Start Application
         run: |
-          cd /home/ubuntu/spring-demo
+          cd "$DEPLOY_DIR"
 
-          RUNNER_TRACKING_ID="" nohup java -jar app.jar > app.log 2>&1 &
+          RUNNER_TRACKING_ID="" nohup java -jar app.jar \
+            > app.log 2>&1 &
 
           echo $! > app.pid
 
       - name: Verify Deployment
         run: |
-          sleep 5
-          curl --fail http://localhost:8080/hello
+          for i in {1..30}; do
+            if curl --fail --silent http://localhost:8080/hello; then
+              echo ""
+              echo "Deployment successful!"
+              exit 0
+            fi
+
+            sleep 2
+          done
+
+          echo "Application failed to start. Logs:"
+          cat "$DEPLOY_DIR/app.log"
+          exit 1
